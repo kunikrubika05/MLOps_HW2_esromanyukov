@@ -1,0 +1,81 @@
+name: mlops-hw2
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.3.0
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+      KAFKA_HEAP_OPTS: -Xms128m -Xmx256m
+    healthcheck:
+      test: ["CMD", "cub", "zk-ready", "localhost:2181", "10"]
+      interval: 5s
+      timeout: 15s
+      retries: 20
+  kafka:
+    image: confluentinc/cp-kafka:7.3.0
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_HEAP_OPTS: -Xms256m -Xmx512m
+    healthcheck:
+      test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:9092", "--list"]
+      interval: 5s
+      timeout: 15s
+      retries: 20
+  kafka-setup:
+    image: confluentinc/cp-kafka:7.3.0
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "-ec"]
+    command:
+      - kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic transactions --partitions 1 --replication-factor 1
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.8@sha256:0152dd511befe6a2c2ef53e930726179669b08116da78500b37c51c96ff5ee77
+    depends_on:
+      kafka-setup:
+        condition: service_completed_successfully
+    environment:
+      CLICKHOUSE_DB: fraud
+      CLICKHOUSE_USER: fraud
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-local-demo-password}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - ./resources.xml:/etc/clickhouse-server/config.d/resources.xml:ro
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --user fraud --password \"$$CLICKHOUSE_PASSWORD\" --query 'SELECT count() FROM fraud.transactions'"]
+      interval: 5s
+      timeout: 10s
+      retries: 20
+  tools:
+    build: .
+    image: mlops-hw2-tools
+    profiles: [tools]
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_USER: fraud
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-local-demo-password}
+    volumes:
+      - ./data:/data:ro
+      - ./results:/results
+    command: ["python", "produce.py", "--help"]
+volumes:
+  clickhouse-data:
